@@ -1,0 +1,43 @@
+{
+  "name": "claude-resume-guard",
+  "version": "1.0.0",
+  "description": "Intercept heavy Claude Code session resumes — warns about token cost and offers fresh Gemini-summarized starts",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "session",
+    "resume",
+    "guard",
+    "tokens",
+    "cost",
+    "gemini",
+    "tmux"
+  ],
+  "author": "Atlas AI <hello@atlas-ai.au>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/atlas-ai-au/claude-resume-guard.git"
+  },
+  "bin": {
+    "claude-resume-guard": "./bin/claude-resume-guard",
+    "claude-session-summarize": "./bin/claude-session-summarize"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js",
+    "install-guard": "./install.sh"
+  },
+  "os": ["linux", "darwin"],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "config/",
+    "hooks/",
+    "install.sh",
+    "scripts/",
+    "README.md",
+    "LICENSE"
+  ]
+}

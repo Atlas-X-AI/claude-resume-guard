@@ -43,7 +43,7 @@ fi
 
 # Register SessionStart hook if not already present
 if ! jq -e '.hooks.SessionStart' ~/.claude/settings.json &>/dev/null; then
-  jq '.hooks.SessionStart = [{"hooks": [{"type": "command", "command": "/home/anombyte/.claude/hooks/session-resume-guard.sh", "timeout": 3000}]}]' \
+  jq --arg cmd "$HOME/.claude/hooks/session-resume-guard.sh" '.hooks.SessionStart = [{"hooks": [{"type": "command", "command": $cmd, "timeout": 3000}]}]' \
     ~/.claude/settings.json > /tmp/settings-guard.json && mv /tmp/settings-guard.json ~/.claude/settings.json
   echo "  -> Registered SessionStart hook in settings.json"
 else

@@ -1,0 +1,9 @@
+# Personal session files
+session-context/
+PLAN.md
+DEBRIEF*.md
+ISSUES.md
+.claude/
+
+# OS
+.DS_Store

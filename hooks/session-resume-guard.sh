@@ -29,7 +29,7 @@ SIZE_MB=$((SIZE_BYTES / 1048576))
 
 # Only warn if session is over 5MB
 if (( SIZE_MB >= 5 )); then
-  TOKENS_K=$((SIZE_BYTES * 45 / 400 / 1000))
+  TOKENS_K=$((SIZE_BYTES / 43 / 1000))
   cat <<WARN_EOF
 {"additionalContext": "SESSION GUARD: This session has ${SIZE_MB}MB of context (~${TOKENS_K}K tokens). Consider running /compact early to reduce cost. Use the \`aw\` alias next time for the resume guard which can offer a fresh Gemini-summarized start."}
 WARN_EOF
