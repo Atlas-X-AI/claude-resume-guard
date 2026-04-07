@@ -171,21 +171,15 @@ PROMPT_EOF
   echo "  Spawning fresh session..."
 
   if [[ -n "${TMUX:-}" ]]; then
-    # Write a launcher script to avoid nested quoting issues with tmux
-    local launcher
-    launcher=$(mktemp /tmp/claude-guard-launch-XXXXXX.sh)
-    cat > "$launcher" <<LAUNCH_EOF
-#!/usr/bin/env zsh
-claude --dangerously-skip-permissions -p "\$(cat '$prompt_file')"
-rm -f '$prompt_file' '$launcher'
-LAUNCH_EOF
-    chmod +x "$launcher"
-    tmux split-window -v -p 60 -c "$project_dir" "zsh '$launcher'"
+    # Start an interactive claude session with the summary injected as
+    # --append-system-prompt. This gives Claude the context without
+    # using -p (which is non-interactive print mode).
+    tmux split-window -v -p 60 -c "$project_dir" \
+      "claude --dangerously-skip-permissions --append-system-prompt-file '${prompt_file}'"
     tmux select-pane -D
     echo "  \033[32m✓\033[0m Fresh session spawned in split pane"
   else
-    claude --dangerously-skip-permissions -p "$(cat "$prompt_file")"
-    rm -f "$prompt_file"
+    claude --dangerously-skip-permissions --append-system-prompt-file "$prompt_file"
   fi
 
   return 0
