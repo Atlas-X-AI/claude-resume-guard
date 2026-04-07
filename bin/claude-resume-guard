@@ -45,8 +45,25 @@ find_session_file() {
     return 1
   fi
 
-  # Find most recent session file
-  ls -t "$session_dir"/*.jsonl 2>/dev/null | head -1
+  # Find the session that --continue would resume.
+  # --continue skips non-interactive sessions (e.g. -p print mode).
+  # Heuristic: skip files under 500KB — those are likely -p fire-and-forget.
+  # Fall back to the most recent file if all are small.
+  local candidates
+  candidates=$(ls -t "$session_dir"/*.jsonl 2>/dev/null)
+  [[ -z "$candidates" ]] && return 1
+
+  local f sz
+  while IFS= read -r f; do
+    sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
+    if (( sz > 512000 )); then
+      echo "$f"
+      return 0
+    fi
+  done <<< "$candidates"
+
+  # All sessions are small — return the most recent
+  echo "$candidates" | head -1
 }
 
 # ── Size helpers ─────────────────────────────────────────────────────
@@ -62,9 +79,11 @@ get_size_bytes() {
 
 estimate_tokens() {
   local bytes="$1"
-  # Validated heuristic: ~45% of JSONL bytes are actual content,
-  # and ~4 bytes per token for mixed English/code
-  echo "scale=0; $bytes * 45 / 400" | bc
+  # Heuristic: ~45% of JSONL bytes are message content.
+  # BPE tokenization averages ~3.5 bytes/token for mixed English/code.
+  # We round down to show a conservative (lower) estimate — better to
+  # underpromise than overpromise on cost savings.
+  echo "scale=0; $bytes * 45 / 350" | bc
 }
 
 estimate_cost() {
