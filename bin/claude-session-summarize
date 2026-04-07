@@ -1,0 +1,181 @@
+#!/usr/bin/env zsh
+# claude-session-summarize — Summarize a Claude session via Gemini Flash
+#
+# Usage: claude-session-summarize <session-jsonl-file> [project-dir]
+#
+# Fallback chain:
+#   1. session-context/*.md files (if /sync was run)
+#   2. Gemini Flash summarization of context files + last N exchanges
+#   3. Raw last-N lines from JSONL (if Gemini unavailable)
+#
+# Output: summary text on stdout, errors on stderr
+
+set -uo pipefail
+
+SESSION_FILE="${1:?Usage: claude-session-summarize <session.jsonl> [project-dir]}"
+PROJECT_DIR="${2:-$(pwd)}"
+CONFIG="$HOME/.config/claude-guard/config.json"
+
+# ── Config ───────────────────────────────────────────────────────────
+_cfg() {
+  local key="$1" default="$2"
+  jq -r ".$key // $default" "$CONFIG" 2>/dev/null || echo "$default"
+}
+
+LAST_N=$(_cfg summary_last_n_lines 200)
+GEMINI_MODEL=$(_cfg gemini_model '"gemini-2.0-flash"')
+# Strip any stray quotes from jq output
+GEMINI_MODEL="${GEMINI_MODEL//\"/}"
+MAX_TOKENS=$(_cfg summary_max_tokens 2000)
+
+# ── Gather session-context files ─────────────────────────────────────
+gather_context_files() {
+  local ctx=""
+  for f in "$PROJECT_DIR"/session-context/CLAUDE-*.md; do
+    if [[ -f "$f" ]]; then
+      ctx+="### $(basename "$f" .md)\n"
+      ctx+="$(head -80 "$f")\n\n"
+    fi
+  done
+
+  # Also check for soul purpose
+  if [[ -f "$PROJECT_DIR/session-context/CLAUDE-soul-purpose.md" ]]; then
+    ctx+="### Soul Purpose\n$(cat "$PROJECT_DIR/session-context/CLAUDE-soul-purpose.md")\n\n"
+  fi
+
+  echo "$ctx"
+}
+
+# ── Extract recent conversation from JSONL ───────────────────────────
+extract_recent() {
+  if [[ ! -f "$SESSION_FILE" ]]; then
+    echo "" && return
+  fi
+
+  # Get last N lines, extract user/assistant text (skip tool noise)
+  tail -n "$LAST_N" "$SESSION_FILE" | \
+    jq -r '
+      select(.message.role == "user" or .message.role == "assistant") |
+      "\(.message.role): " + (
+        .message.content |
+        if type == "array" then
+          [.[] | select(.type == "text") | .text] | join("\n")
+        elif type == "string" then .
+        else ""
+        end
+      )' 2>/dev/null | \
+    tail -c 8000  # Cap at ~2K tokens for Gemini input
+}
+
+# ── Resolve Gemini API key ───────────────────────────────────────────
+get_gemini_key() {
+  # Priority: env var > config file > bitwarden
+  if [[ -n "${GEMINI_API_KEY:-}" ]]; then
+    echo "$GEMINI_API_KEY"
+    return
+  fi
+
+  if [[ -f "$HOME/.config/gemini/api-key" ]]; then
+    cat "$HOME/.config/gemini/api-key"
+    return
+  fi
+
+  if command -v bw &>/dev/null; then
+    bw get password "Gemini API Key" 2>/dev/null || true
+  fi
+}
+
+# ── Call Gemini API ──────────────────────────────────────────────────
+call_gemini() {
+  local prompt="$1"
+  local api_key="$2"
+
+  # Strip control characters that break JSON, then use jq --arg for proper escaping
+  local clean_prompt
+  clean_prompt=$(printf '%s' "$prompt" | tr -d '\000-\010\013\014\016-\037')
+
+  local body_tmp
+  body_tmp=$(mktemp /tmp/gemini-body-XXXXXX.json)
+  jq -n --arg prompt "$clean_prompt" '{
+    contents: [{parts: [{text: $prompt}]}],
+    generationConfig: {maxOutputTokens: 2000, temperature: 0.3}
+  }' > "$body_tmp" 2>/dev/null
+
+  if [[ ! -s "$body_tmp" ]]; then
+    rm -f "$body_tmp"
+    return 1
+  fi
+
+  local response
+  response=$(curl -s --max-time 30 \
+    "https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${api_key}" \
+    -H 'Content-Type: application/json' \
+    -d @"$body_tmp" 2>/dev/null)
+
+  rm -f "$body_tmp"
+  # Use printf to avoid zsh echo expanding \n in response
+  printf '%s' "$response" | jq -r '.candidates[0].content.parts[0].text // empty' 2>/dev/null
+}
+
+# ── Main ─────────────────────────────────────────────────────────────
+
+CONTEXT=$(gather_context_files)
+RECENT=$(extract_recent)
+
+# If we have context files, that's already useful
+if [[ -n "$CONTEXT" && ${#CONTEXT} -gt 100 ]]; then
+  HAS_CONTEXT=true
+else
+  HAS_CONTEXT=false
+fi
+
+# Try Gemini summarization
+API_KEY=$(get_gemini_key)
+
+if [[ -n "$API_KEY" && ( -n "$CONTEXT" || -n "$RECENT" ) ]]; then
+  GEMINI_PROMPT="You are summarizing a Claude Code AI session for handoff to a fresh session.
+
+## Session Context Files
+${CONTEXT:-No session-context files found.}
+
+## Last Exchange Excerpt
+${RECENT:-No recent exchanges available.}
+
+## Your Task
+Write a concise handoff summary (under 500 words) covering:
+1. What was the goal (soul purpose)?
+2. What was completed?
+3. What's still in progress or blocked?
+4. Key decisions made and WHY
+5. Specific next steps for the fresh session
+
+Be direct. No fluff. The fresh session will use this as its starting context."
+
+  SUMMARY=$(call_gemini "$GEMINI_PROMPT" "$API_KEY")
+
+  if [[ -n "$SUMMARY" ]]; then
+    echo "$SUMMARY"
+    exit 0
+  fi
+
+  echo "Warning: Gemini API call failed, using fallback" >&2
+fi
+
+# Fallback: raw context files
+if $HAS_CONTEXT; then
+  echo "# Session Context (from files — Gemini unavailable)"
+  echo ""
+  printf '%b\n' "$CONTEXT"
+  exit 0
+fi
+
+# Last resort: raw recent exchanges
+if [[ -n "$RECENT" ]]; then
+  echo "# Recent Session Exchanges (raw — no context files or Gemini)"
+  echo ""
+  echo "$RECENT"
+  exit 0
+fi
+
+echo "# No session context available" >&2
+exit 1
