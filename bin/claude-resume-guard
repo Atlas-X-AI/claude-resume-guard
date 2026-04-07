@@ -95,11 +95,24 @@ estimate_cost() {
 # ── Recency check ───────────────────────────────────────────────────
 check_recency() {
   local file="$1"
-  local last_mod
-  last_mod=$(stat -c%Y "$file" 2>/dev/null) || return 1
+
+  # Use the last message timestamp from INSIDE the JSONL, not the file mtime.
+  # File mtime gets updated on every resume attempt (even failed ones),
+  # making the cache appear "hot" when it's actually cold.
+  local last_ts
+  last_ts=$(tail -20 "$file" | jq -r 'select(.timestamp) | .timestamp' 2>/dev/null | tail -1)
+
+  local last_epoch
+  if [[ -n "$last_ts" ]]; then
+    last_epoch=$(date -d "$last_ts" +%s 2>/dev/null) || last_epoch=$(stat -c%Y "$file")
+  else
+    # Fallback to mtime if no timestamp found
+    last_epoch=$(stat -c%Y "$file")
+  fi
+
   local now
   now=$(date +%s)
-  local age=$((now - last_mod))
+  local age=$((now - last_epoch))
 
   if (( age < CACHE_HOT )); then
     _guard_log "Session active ${age}s ago — cache hot, skipping guard"
