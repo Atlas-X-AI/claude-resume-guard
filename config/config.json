@@ -1,0 +1,10 @@
+{
+  "max_safe_size_mb": 5,
+  "warn_size_mb": 2,
+  "auto_summarize": true,
+  "gemini_model": "gemini-2.0-flash",
+  "summary_last_n_lines": 200,
+  "summary_max_tokens": 2000,
+  "cache_hot_seconds": 300,
+  "cache_warm_seconds": 3600
+}

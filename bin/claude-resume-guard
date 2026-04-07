@@ -1,0 +1,266 @@
+#!/usr/bin/env zsh
+# claude-resume-guard — Intercept heavy session resumes before tokens are committed
+#
+# Called by the aw/awc wrapper function BEFORE claude launches.
+# Checks session JSONL file size + recency, warns about cost, offers
+# fresh-start with Gemini summary as alternative.
+#
+# Exit codes:
+#   0 = proceed with resume (or no session found)
+#   1 = user chose fresh start or cancel (caller should NOT resume)
+#   2 = fresh start launched (caller should NOT resume)
+
+set -euo pipefail
+
+CONFIG="$HOME/.config/claude-guard/config.json"
+GUARD_LOG="$HOME/.local/share/claude-guard/guard.log"
+
+# ── Logging ──────────────────────────────────────────────────────────
+_guard_log() {
+  mkdir -p "$(dirname "$GUARD_LOG")"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$GUARD_LOG"
+}
+
+# ── Config ───────────────────────────────────────────────────────────
+_cfg() {
+  local key="$1" default="$2"
+  jq -r ".$key // $default" "$CONFIG" 2>/dev/null || echo "$default"
+}
+
+MAX_SAFE_MB=$(_cfg max_safe_size_mb 5)
+WARN_MB=$(_cfg warn_size_mb 2)
+CACHE_HOT=$(_cfg cache_hot_seconds 300)
+CACHE_WARM=$(_cfg cache_warm_seconds 3600)
+
+# ── Find session file ────────────────────────────────────────────────
+find_session_file() {
+  local project_dir="$1"
+
+  # Convert project path to Claude's encoded storage format
+  local encoded_path="${project_dir//\//-}"
+  encoded_path="${encoded_path#-}"
+  local session_dir="$HOME/.claude/projects/-${encoded_path}"
+
+  if [[ ! -d "$session_dir" ]]; then
+    return 1
+  fi
+
+  # Find most recent session file
+  ls -t "$session_dir"/*.jsonl 2>/dev/null | head -1
+}
+
+# ── Size helpers ─────────────────────────────────────────────────────
+get_size_mb() {
+  local bytes
+  bytes=$(stat -c%s "$1" 2>/dev/null) || { echo "0"; return; }
+  echo "scale=1; $bytes / 1048576" | bc
+}
+
+get_size_bytes() {
+  stat -c%s "$1" 2>/dev/null || echo 0
+}
+
+estimate_tokens() {
+  local bytes="$1"
+  # Validated heuristic: ~45% of JSONL bytes are actual content,
+  # and ~4 bytes per token for mixed English/code
+  echo "scale=0; $bytes * 45 / 400" | bc
+}
+
+estimate_cost() {
+  local tokens="$1"
+  # Opus input pricing: $15/MTok (uncached), $1.50/MTok (cached)
+  echo "scale=2; $tokens * 15 / 1000000" | bc
+}
+
+# ── Recency check ───────────────────────────────────────────────────
+check_recency() {
+  local file="$1"
+  local last_mod
+  last_mod=$(stat -c%Y "$file" 2>/dev/null) || return 1
+  local now
+  now=$(date +%s)
+  local age=$((now - last_mod))
+
+  if (( age < CACHE_HOT )); then
+    _guard_log "Session active ${age}s ago — cache hot, skipping guard"
+    echo "hot"
+    return 0
+  fi
+
+  if (( age < CACHE_WARM )); then
+    echo "warm:$age"
+    return 0
+  fi
+
+  echo "cold:$age"
+  return 0
+}
+
+# ── Fresh start ──────────────────────────────────────────────────────
+fresh_start_with_summary() {
+  local session_file="$1"
+  local project_dir="$2"
+
+  echo "  Generating summary..."
+
+  local summary=""
+  if command -v claude-session-summarize &>/dev/null; then
+    summary=$(claude-session-summarize "$session_file" "$project_dir" 2>/dev/null) || true
+  fi
+
+  if [[ -z "$summary" ]]; then
+    echo "\033[33m  Gemini summary unavailable — using session-context files\033[0m"
+    summary="# Session Context (from files)\n\n"
+    for f in "$project_dir"/session-context/CLAUDE-*.md; do
+      [[ -f "$f" ]] && summary+="## $(basename "$f")\n$(cat "$f")\n\n"
+    done
+  fi
+
+  if [[ -z "$summary" || "$summary" == "# Session Context (from files)"* && ${#summary} -lt 50 ]]; then
+    echo "\033[31m  No context available. Starting bare session.\033[0m"
+    summary="No prior session context available. Start fresh."
+  fi
+
+  # Write summary to temp file
+  local prompt_file
+  prompt_file=$(mktemp /tmp/claude-guard-prompt-XXXXXX.txt)
+  cat > "$prompt_file" <<PROMPT_EOF
+You are resuming work that a previous session started. Here is a summary of what was done, what's left, and key insights:
+
+$summary
+
+Start by reading the session-context files in session-context/ for current state, then continue the work described above.
+PROMPT_EOF
+
+  local word_count
+  word_count=$(wc -w < "$prompt_file")
+  echo "  Summary ready (${word_count} words)"
+  echo "  Spawning fresh session..."
+
+  if [[ -n "${TMUX:-}" ]]; then
+    tmux split-window -v -p 60 -c "$project_dir" \
+      "claude --dangerously-skip-permissions -p \"\$(cat '$prompt_file')\" ; rm -f '$prompt_file'"
+    tmux select-pane -D
+    echo "  \033[32m✓\033[0m Fresh session spawned in split pane"
+  else
+    claude --dangerously-skip-permissions -p "$(cat "$prompt_file")"
+    rm -f "$prompt_file"
+  fi
+
+  return 0
+}
+
+# ── Main guard logic ─────────────────────────────────────────────────
+guard_check() {
+  local project_dir="${1:-$(pwd)}"
+
+  local session_file
+  session_file=$(find_session_file "$project_dir") || true
+
+  if [[ -z "$session_file" || ! -f "$session_file" ]]; then
+    _guard_log "No session file found for $project_dir — proceeding"
+    exit 0
+  fi
+
+  local size_bytes
+  size_bytes=$(get_size_bytes "$session_file")
+  local size_mb
+  size_mb=$(get_size_mb "$session_file")
+  local size_int=${size_mb%.*}
+  size_int=${size_int:-0}
+
+  _guard_log "Session: $session_file (${size_mb}MB)"
+
+  # Skip tiny sessions entirely
+  if (( size_int < WARN_MB )); then
+    _guard_log "Size OK (${size_mb}MB < ${WARN_MB}MB) — proceeding"
+    exit 0
+  fi
+
+  # Check recency — hot cache means cheap resume
+  local recency
+  recency=$(check_recency "$session_file")
+
+  if [[ "$recency" == "hot" ]]; then
+    exit 0
+  fi
+
+  local tokens
+  tokens=$(estimate_tokens "$size_bytes")
+  local cost
+  cost=$(estimate_cost "$tokens")
+  local tokens_k=$((tokens / 1000))
+
+  # Warm cache — just warn
+  if [[ "$recency" == warm:* ]]; then
+    local age_min=$(( ${recency#warm:} / 60 ))
+    if (( size_int < MAX_SAFE_MB )); then
+      echo "\033[33m⚠ Session: ${size_mb}MB (~${tokens_k}K tokens) | Idle ${age_min}m | Cache partially warm\033[0m"
+      echo "  Estimated cost: ~\$${cost} (may be lower with partial cache hits)"
+      _guard_log "Warm warning shown — proceeding"
+      exit 0
+    fi
+  fi
+
+  # Cold cache OR large session — full block menu
+  local age_display=""
+  if [[ "$recency" == cold:* ]]; then
+    local age_hrs=$(( ${recency#cold:} / 3600 ))
+    age_display=" | Idle ${age_hrs}h | Cache COLD"
+  elif [[ "$recency" == warm:* ]]; then
+    local age_min=$(( ${recency#warm:} / 60 ))
+    age_display=" | Idle ${age_min}m"
+  fi
+
+  local cached_cost
+  cached_cost=$(echo "scale=2; $tokens * 1.5 / 1000000" | bc)
+
+  echo ""
+  echo "\033[31m■ Heavy session detected: ${size_mb}MB (~${tokens_k}K tokens)${age_display}\033[0m"
+  echo "  Cost: ~\$${cost} uncached | ~\$${cached_cost} cached"
+  echo "  File: $(basename "$session_file")"
+  echo "  Modified: $(stat -c%y "$session_file" | cut -d. -f1)"
+  echo ""
+  echo "  Options:"
+  echo "    \033[32m1)\033[0m Fresh start with Gemini summary (recommended)"
+  echo "    \033[33m2)\033[0m Resume anyway (full token cost)"
+  echo "    \033[36m3)\033[0m Resume with --bare (minimal context, no hooks)"
+  echo "    \033[90m4)\033[0m Cancel"
+  echo ""
+
+  local choice
+  read -r "choice?  Choice [1/2/3/4]: "
+
+  case "$choice" in
+    1)
+      _guard_log "User chose fresh start with Gemini summary"
+      fresh_start_with_summary "$session_file" "$project_dir"
+      exit 2  # Fresh session launched
+      ;;
+    2)
+      _guard_log "User chose to resume anyway (${size_mb}MB, ~\$${cost})"
+      exit 0  # Proceed with resume
+      ;;
+    3)
+      _guard_log "User chose --bare resume"
+      echo "  Launching bare session..."
+      if [[ -n "${TMUX:-}" ]]; then
+        tmux split-window -v -p 60 -c "$project_dir" \
+          "claude --bare --dangerously-skip-permissions --continue"
+        tmux select-pane -D
+        echo "  \033[32m✓\033[0m Bare session spawned in split pane"
+      else
+        claude --bare --dangerously-skip-permissions --continue
+      fi
+      exit 2
+      ;;
+    *)
+      _guard_log "User cancelled"
+      exit 1
+      ;;
+  esac
+}
+
+# ── Entry point ──────────────────────────────────────────────────────
+guard_check "$@"
