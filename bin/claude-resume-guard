@@ -170,18 +170,15 @@ PROMPT_EOF
   echo "  Summary ready (${word_count} words)"
   echo "  Spawning fresh session..."
 
-  # Launch interactive claude with summary as system context + a kick-off prompt.
-  # --append-system-prompt-file injects the Gemini summary invisibly.
-  # The positional prompt gives Claude a visible first message to act on.
-  local kick="Read session-context/ files and continue where the previous session left off. The system prompt contains a summary of prior work."
-
+  # Launch interactive claude with Gemini summary as system context.
+  # /start handles session bootstrap — the summary is just extra context.
   if [[ -n "${TMUX:-}" ]]; then
     tmux split-window -v -p 60 -c "$project_dir" \
-      "claude --dangerously-skip-permissions --append-system-prompt-file '${prompt_file}' '${kick}'"
+      "claude --dangerously-skip-permissions --append-system-prompt-file '${prompt_file}' '/start'"
     tmux select-pane -D
     echo "  \033[32m✓\033[0m Fresh session spawned in split pane"
   else
-    claude --dangerously-skip-permissions --append-system-prompt-file "$prompt_file" "$kick"
+    claude --dangerously-skip-permissions --append-system-prompt-file "$prompt_file" "/start"
   fi
 
   return 0
