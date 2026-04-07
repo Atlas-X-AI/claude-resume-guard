@@ -1,5 +1,7 @@
 # claude-resume-guard
 
+> **Alpha** — Works, but actively being refined. Expect breaking changes.
+
 Intercept heavy Claude Code session resumes before they burn through your token budget.
 
 When you resume a session with a large conversation history, Claude replays the entire JSONL file as input tokens. A 30MB session costs ~$10 uncached. This guard warns you before that happens and offers cheaper alternatives.
@@ -132,4 +134,4 @@ This was calibrated against Claude's own token count: a 31MB file = 727.8K token
 
 ## License
 
-MIT - Atlas AI Pty Ltd
+MIT - Atlas X AI Pty Ltd
