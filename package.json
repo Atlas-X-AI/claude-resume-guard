@@ -1,6 +1,6 @@
 {
   "name": "claude-resume-guard",
-  "version": "0.1.0-alpha.1",
+  "version": "1.0.0",
   "description": "Intercept heavy Claude Code session resumes — warns about token cost and offers fresh Gemini-summarized starts",
   "keywords": [
     "claude",
@@ -27,7 +27,10 @@
     "postinstall": "node scripts/postinstall.js",
     "install-guard": "./install.sh"
   },
-  "os": ["linux", "darwin"],
+  "os": [
+    "linux",
+    "darwin"
+  ],
   "engines": {
     "node": ">=18"
   },
